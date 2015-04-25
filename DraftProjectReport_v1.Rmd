@@ -1,0 +1,265 @@
+---
+title: "Coursera Machine Learning - Course Project  \n Human Activity Recognition"
+author: "Ben Gaff"
+date: "22 April 2015"
+output:
+  html_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 8
+---
+
+<style>
+h1{
+    color: white;
+    padding: 10px;
+    background-color: #3399ff;
+    text-align: center
+}
+
+h2{
+    color: white;
+    background-color: #3399ff;
+    text-align: left
+}
+
+ul {
+    list-style-type: square;  
+}
+
+.MathJax_Display {
+    padding: 0.5em;
+    background-color: #eaeff3
+}
+</style>
+
+## Executive Summary:  
+
+The purpose of this document is to analyze data collected as part of an academic study [Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201). This report explores the relationship between a measure of "how (well)" a Weight Lifting Exercise activity was performed by subjects measured in the data (recorded in the `classe` variable) and other variables included in the dataset that were collected from sensors placed on the arm, forearm, belt and dumbbell of 6 subjects. 3 Machine Learning algorithms were tested to see which can provide the best prediction of the `classe` variable.  
+
+5-fold cross-validation within the 70% sample of the data that was used for training showed a low out of sample error estimate for the selected model of `0.72%`. This was further validated by the fact that the selected model provides a high Accuracy measure of `0.9951` when its predictions were tested against the remaining 30% of the original data that was used for testing. The expected out-of-sample error rate is `0.49%`.  
+
+##  1. Data Load & Preparation:  
+
+The following libraries were used at various points throughout the analysis:  
+
+```{r loadLibraries,results='hide',warning=FALSE}
+library(RCurl)
+library(caret)
+library(reshape2)
+library(ggplot2)
+library(rattle) 
+```
+
+### 1.1 - Import data provided for the project  
+The following code was used to load the data used within the report.  
+```{r importData,results='hide',cache=TRUE}
+source1 <- getURL("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+originalPMLtraining <- read.csv(textConnection(source1))
+source2 <- getURL("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+originalPMLtesting <- read.csv(textConnection(source2))
+rm(source1,source2)
+```
+There were `r nrow(originalPMLtraining)` observations in the original PML training data and a further `r nrow(originalPMLtesting)` observations in the PML testing data, which is to be used to predict cases for which the `classe` variable is not known.  
+
+### 1.2 - Create a training subset of the originalPMLtraining data  
+
+The following code was used to create training (70%) and testing (30%) subsets of the `originalPMLtraining` data. Subsequent cross-validation was undertaken using sub-sets of the training data.  
+
+```{r createSubsets,results='hide',cache=TRUE}
+set.seed(12321)
+inTrain = createDataPartition(originalPMLtraining$classe, p = 0.70,list=FALSE)
+training = originalPMLtraining[inTrain,]
+testing = originalPMLtraining[-inTrain,]
+```
+
+The `training` data includes `r nrow(training)` observations and the `testing` data includes `r nrow(testing)` observations.  
+
+##   2. Exploratory Data Analysis & Predictor Selection
+### 2.1 - Review `training` data  
+The first step in the Exploratory Data Analysis (EDA) was to review the names of the variables in the data.
+
+```{r showVarNames}
+head(names(training))
+```
+
+The variables can be broadly categorised as follows:  
+ - [Variables 1:7]     Observation descriptions [Variables 1:7] [Not useful for prediction]  
+ - [Variables 8:45]    Measurements related to "belt"  
+ - [Variables 46:83]   Measurements related to "arm"  
+ - [Variables 84:121]  Measurements related to "dumbbell"  
+ - [Variables 122:159] Measurements related to "belt"forearm"  
+ - [Variable 160]      "classe" variable  
+
+Using the `summary` function provided an overview of the variable distributions.  
+```{r showBriefSummary}
+head(summary(training[c(1:3,158:160)]))
+```
+
+It appears that the `X` variable within the data is an index variable. We can see that it is perfectly correlated with 
+the `classe` variable, but of course is not useful for prediction since it is related to the design of the study rather than being an independent variable.  
+```{r plotX,fig.cap="Figure 1: Plot of Variable X vs. classe in training Data",cache=TRUE}
+qplot(X,colour=classe,data=training)
+```
+
+All observation description variables were removed from the training data apart from `X`, which was used as an "id" variable for subsequent parts of the EDA.  
+```{r removeDescVars,results='hide',cache=TRUE}
+training <- training[,-c(2:7)]
+```
+
+The `summary()` function also showed 9 variables that only contained blank, #DIV/0! or 0 values. These were removed from the `training` data set.  
+```{r rmMissingDataVars,results='hide',cache=TRUE}
+dropVariables <- c("kurtosis_yaw_belt", "skewness_yaw_belt", "amplitude_yaw_belt", 
+                  "kurtosis_yaw_dumbbell", "skewness_yaw_dumbbell", "amplitude_yaw_dumbbell",
+                  "kurtosis_yaw_forearm", "skewness_yaw_forearm", "amplitude_yaw_forearm")
+training <- training[,!names(training) %in% dropVariables]
+```
+
+The `str()` function also showed `24` factor variables, which were converted into numeric format.  
+```{r convertFactors,results='hide',cache=TRUE, warning=FALSE}
+str(training)
+varTypes <- data.frame(sapply(training[,-145],class))
+factorVars <- grep("factor",varTypes[,1])
+
+for(i in factorVars) {
+    training[,i] <- as.numeric(levels(training[,i]))[training[,i]]
+}
+```
+
+A matrix of variable correlations was created with only the bottom triangle of the matrix being populated so that there was only one correlation statistic for each of the variable pairs and no figure for the first predictor variable in the data.  
+```{r checkCorrs,results='hide',cache=TRUE}
+tmp <- cor(training[,-c(1,145)],use = "complete.obs")   
+tmp[upper.tri(tmp)] <- 0; diag(tmp) <- 0
+tmpdf <- data.frame(tmp,keep.rownames=TRUE)
+```
+
+A variable for the maximum (absolute) correlation was created and used to filter those with a very high value that were dropped from the `training` data.  
+```{r EvalPlusRmCorrs,cache=TRUE,fig.cap="Figure 2: Histogram Plot of Maximum Correlation per Predictor Variable"}
+tmpdf[, "maxCorr"] <- apply(tmpdf[, 1:143], 1, function(x) {max(abs(x),na.rm=TRUE)})
+hist(tmpdf$maxCorr,breaks=100)  
+sum(tmpdf$maxCorr>0.99) # Shows 12 variables that have >0.99 correlation with at least one other variable
+dropVariables <- rownames(tmpdf[tmpdf$maxCorr>0.99,])
+training <- training[,!names(training) %in% dropVariables]
+```
+
+Finally, variables with large numbers of NA values were also investigated.  
+```{r investigateHighNAvars,results='hide',cache=TRUE}
+trainingNAcounts <- data.frame(apply(training,2,function(x) {sum(is.na(x))}))
+colnames(trainingNAcounts) <- "NAcount"
+hasHighNAcount <- trainingNAcounts>13400
+HighNAcountVars <- rownames(trainingNAcounts[hasHighNAcount,,drop=FALSE])   # 80 variables have >13,400 missing values
+```
+
+Plots of variables with large numbers of NA values vs. the `classe` variable were also created to understand whether or not they would be useful for modelling. [Note only one of the 4 plots is shown for illustration.]  
+```{r plotHighNAvars,fig.cap="Figure 3: Plot of Predictor Variables (With Large NA Counts) vs. X",cache=TRUE}
+trainingMelt <- melt(training,id=c("X","classe"))  
+missingMelt <- is.na(trainingMelt[,4]); trainingMelt <- trainingMelt[!missingMelt,]  # Remove missing values from trainingMelt
+
+beltVars <- HighNAcountVars[grep("_belt",HighNAcountVars)]; armVars <- HighNAcountVars[grep("_arm",HighNAcountVars)]
+dumbbellVars <- HighNAcountVars[grep("_dumbbell",HighNAcountVars)]; forearmVars <- HighNAcountVars[grep("_forearm",HighNAcountVars)]
+varTypes <- vector('list', length(4))
+varTypes[[1]] <- beltVars; varTypes[[2]] <- armVars; varTypes[[3]] <- dumbbellVars; varTypes[[4]] <- forearmVars
+
+for(i in 4) {     # Note only forearm variables shown here to illustrate findings & conclusions, but all 4 groups reviewed in EDA
+    varPlot <- qplot(x=X,y=value,colour=classe,data=trainingMelt[trainingMelt$variable %in% varTypes[[i]],])
+    print(varPlot + facet_wrap(~variable, ncol=4, scales = "free_y"))
+}
+```
+
+None of the `80` variables in `HighNAcountVars` have more than ~20 observations with a strong bias towards one or more classe. Therefore all `80` variables were removed from the training data.  
+```{r removeHighNAVars,results='hide',cache=TRUE}
+training <- training[,!names(training) %in% HighNAcountVars] # Leaves 51 predictors
+training <- training[,-1]  # Drop X variable so training data only includes predictors & response (classe)
+```
+
+## 3. Model Fitting & Cross-validation:  
+
+### 3.1 Fit Model1 Using Trees [rpart]  
+
+The first ML model tested was a Tree model using the `rpart` function in `caret`.  Pre-processing was applied to center and scale the data, but apart from this all other settings used the function defaults.  
+```{r fitMod1,results='hide',cache=TRUE}
+set.seed(12321)
+modFit1 <- train(classe ~ .,data=training,method="rpart",preProcess=c("center","scale"))  # Fit model using training data
+```
+
+The following figure shows a plot of the tree that was created by the best-performing model identified by the `train()` function, which did not define any classifications for `classe` D.  
+```{r showMod1TreeDiagram,fig.cap="Figure 4: Model1 Tree Diagram",cache=TRUE}
+fancyRpartPlot(modFit1$finalModel)
+```
+
+The in-sample confusion matrix for this model confirms that the model did not perform very well within the `training` data.  
+```{r showMod1ConfusionMatrix,cache=TRUE}
+pred1_IS <- predict(modFit1,newdata=training)     # Create in-sample predictions
+confusionMatrix(pred1_IS,training$classe)     # Create in-sample confusion matrix
+```
+
+### 3.2 Fit Model2 Using RandomForests [rf]  
+
+The second ML model tested was a Random Forests model using the `rf` function in `caret`.  Pre-processing was applied to center and scale the data, but apart from this all other settings used the function defaults.  
+
+```{r fitMod2,results='hide',cache=TRUE}
+set.seed(12321)
+modFit2 <- train(classe ~ .,data=training,method="rf",preProcess=c("center","scale"))  # Fit model using training data
+```
+
+The confusion matrix for this model showed, in terms of in-sample performance, the model compared very well to the first (Tree) model.  
+```{r showMod2ConfusionMatrix,cache=TRUE}
+pred2_IS <- predict(modFit2,newdata=training)     # Create in-sample predictions
+confusionMatrix(pred2_IS,training$classe)     # Create in-sample confusion matrix
+```
+
+### 3.3 Fit Model3 GradientBoosting [gbm]  
+
+The third ML model tested was a Gradient Boosting model using the `gbm` function in `caret`.  Pre-processing was applied to center and scale the data, but apart from this all other settings used the function defaults.  
+
+```{r fitMod3,results='hide',cache=TRUE}
+set.seed(12321)
+modFit3 <- train(classe ~ .,data=training,method="gbm",preProcess=c("center","scale"),verbose=FALSE)  # Fit model using training data
+```
+
+The in-sample confusion matrix for this model showed improved performance compared to the first (Tree) model, but not as strong as the second (Random Forests) model.  
+```{r showMod3ConfusionMatrix,cache=TRUE}
+pred3_IS <- predict(modFit3,newdata=training)     # Create in-sample predictions
+confusionMatrix(pred3_IS,training$classe)     # Create in-sample confusion matrix
+```
+
+On the basis of the in-sample accuracy measures modelFit2 (Random Forests model) was selected to be used for cross-validation, out-of-sample testing and prediction for the 20 observations included in the `originalPMLtesting` data.  
+
+### 3.4 Run cross-validation on the chosen model  
+
+In order to run cross-validation on the selected Random Forests model a `trainControl` object was created to define the parameters that should be used within the `train()` function.  
+
+```{r fitWithCV,results='hide',cache=TRUE}
+fitControl <- trainControl(method = "cv",number = 5) ## 5-fold Cross Validation Used to minimise variance of OOS estimate
+set.seed(12321)
+modFitFinal <- train(classe ~ .,data=training,method="rf",trControl=fitControl,preProcess=c("center","scale"))  # Fit final model
+```
+
+Since the number of folds used in the cross-validation is small (5) a small variance is expected for the Out of Bag (OOB) error, which can be used as an estimate of the Out-of-Sample (OOS) error.  
+```{r showModFinal,cache=TRUE}
+print(modFitFinal$finalModel)
+```
+
+The OOB error is `0.72%` and so we have a low estimate for the OOS error, with expected low variance. The model testing shown in the next section will be used to validate this assumption.  
+
+## 4. Final Model Testing & Prediction for 20 Test Cases:  
+
+### 4.1 Final model testing  
+
+The final stage in model testing and validation was to test the selected model against the 30% of the `originalPMLtraining` data that was first saved in the `testing` data set.  
+
+```{r showModFinalTestConfusionMatrix,cache=TRUE}
+predFinal_OS <- predict(modFitFinal,newdata=testing)     # Create out-of-sample predictions
+confusionMatrix(predFinal_OS,testing$classe)     # Create out-of-sample confusion matrix
+```
+
+We can see from the confusion matrix created on the `testing` data that the high accuracy estimated from the model build and selection analysis shown in the previous section has been confirmed with an Accuracy estimate of `0.9951` and a `Kappa` metric of `0.9938`. Only `28` of the `5885` observations in the `testing` data were wrongly predicted using the final model. As such the expected out-of-sample error rate is `0.49%`, which is consistent with the OOB error of `0.72%` estimated from the cross-validation undertaken within the `training` data.  
+
+### 4.2 Prediction for 20 test cases  
+
+The 20 test cases stored in the `originalPMLtesting` object were scored using the following code to assign a predicted `classe` for each and append to the dataset.  
+
+```{r predict20TestCases,cache=TRUE}
+predTest20 <- predict(modFitFinal,newdata=originalPMLtesting)
+originalPMLtesting$prediction <- predTest20
+```
